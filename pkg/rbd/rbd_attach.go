@@ -214,7 +214,7 @@ func waitForPath(pool, image string, maxRetries int, useNbdDriver bool) (string,
 
 // Check if rbd-nbd tools are installed.
 func checkRbdNbdTools() bool {
-	_, err := execCommand("modprobe", []string{"nbd"})
+	_, err := execCommand("modprobe", []string{"nbd", "nbds_max=128"})
 	if err != nil {
 		klog.V(3).Infof("rbd-nbd: nbd modprobe failed with error %v", err)
 		return false
