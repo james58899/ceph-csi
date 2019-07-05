@@ -207,20 +207,19 @@ func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	idLk := targetPathLocker.Lock(targetPath)
 	defer targetPathLocker.Unlock(idLk, targetPath)
 
-	// notMnt, err := mount.IsNotMountPoint(ns.mounter, targetPath)
-	// if err != nil {
-	// 	if os.IsNotExist(err) {
-	// 		// targetPath has already been deleted
-	// 		klog.V(4).Infof("targetPath: %s has already been deleted", targetPath)
-	// 		return &csi.NodeUnpublishVolumeResponse{}, nil
-	// 	}
-	// 	return nil, status.Error(codes.NotFound, err.Error())
-	// }
-	// if notMnt {
-	// 	// TODO should consider deleting path instead of returning error,
-	// 	// once all codes become ready for csi 1.0.
-	// 	return nil, status.Error(codes.NotFound, "volume not mounted")
-	// }
+	notMnt, err := mount.IsNotMountPoint(ns.mounter, targetPath)
+	if err != nil && os.IsNotExist(err) {
+		// targetPath has already been deleted
+		klog.V(4).Infof("targetPath: %s has already been deleted", targetPath)
+		return &csi.NodeUnpublishVolumeResponse{}, nil
+	}
+	if err == nil && notMnt {
+		err := os.Remove(targetPath)
+		if err != nil {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+		return &csi.NodeUnpublishVolumeResponse{}, nil
+	}
 
 	devicePath, cnt, err := mount.GetDeviceNameFromMount(ns.mounter, targetPath)
 	if err != nil {
