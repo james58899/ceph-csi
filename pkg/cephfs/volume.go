@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"os"
 	"path"
+	"strconv"
+	"strings"
 
 	"github.com/ceph/ceph-csi/pkg/util"
 
@@ -27,80 +29,145 @@ import (
 )
 
 const (
-	cephVolumesRoot = "csi-volumes"
-
-	namespacePrefix = "ns-"
+	namespacePrefix   = "fsvolumens_"
+	csiSubvolumeGroup = "csi"
 )
 
-func getCephRootPathLocal(volID volumeID) string {
+var (
+	// cephfsInit is used to create "csi" subvolume group for the first time the csi plugin loads.
+	// Subvolume group create gets called every time the plugin loads, though it doesn't result in error
+	// its unnecessary
+	cephfsInit = false
+)
+
+func getCephRootVolumePathLocalDeprecated(volID volumeID) string {
+	return path.Join(getCephRootPathLocalDeprecated(volID), "csi-volumes", string(volID))
+}
+
+func getVolumeRootPathCephDeprecated(volID volumeID) string {
+	return path.Join("/", "csi-volumes", string(volID))
+}
+
+func getCephRootPathLocalDeprecated(volID volumeID) string {
 	return fmt.Sprintf("%s/controller/volumes/root-%s", PluginFolder, string(volID))
 }
 
-func getCephRootVolumePathLocal(volID volumeID) string {
-	return path.Join(getCephRootPathLocal(volID), cephVolumesRoot, string(volID))
-}
+func getVolumeRootPathCeph(volOptions *volumeOptions, cr *util.Credentials, volID volumeID) (string, error) {
+	stdout, _, err := util.ExecCommand(
+		"ceph",
+		"fs",
+		"subvolume",
+		"getpath",
+		volOptions.FsName,
+		string(volID),
+		"--group_name",
+		csiSubvolumeGroup,
+		"-m", volOptions.Monitors,
+		"-c", util.CephConfigPath,
+		"-n", cephEntityClientPrefix+cr.ID,
+		"--key="+cr.Key)
 
-func getVolumeRootPathCeph(volID volumeID) string {
-	return path.Join("/", cephVolumesRoot, string(volID))
+	if err != nil {
+		klog.Errorf("failed to get the rootpath for the vol %s(%s)", string(volID), err)
+		return "", err
+	}
+	return strings.TrimSuffix(string(stdout), "\n"), nil
 }
 
 func getVolumeNamespace(volID volumeID) string {
 	return namespacePrefix + string(volID)
 }
 
-func setVolumeAttribute(root, attrName, attrValue string) error {
-	return execCommandErr("setfattr", "-n", attrName, "-v", attrValue, root)
-}
-
-func createVolume(volOptions *volumeOptions, adminCr *util.Credentials, volID volumeID, bytesQuota int64) error {
-	if err := mountCephRoot(volID, volOptions, adminCr); err != nil {
-		return err
-	}
-	defer unmountCephRoot(volID)
-
-	var (
-		volRoot         = getCephRootVolumePathLocal(volID)
-		volRootCreating = volRoot + "-creating"
-	)
-
-	if pathExists(volRoot) {
-		klog.V(4).Infof("cephfs: volume %s already exists, skipping creation", volID)
-		return nil
-	}
-
-	if err := createMountPoint(volRootCreating); err != nil {
-		return err
-	}
-
-	if bytesQuota > 0 {
-		if err := setVolumeAttribute(volRootCreating, "ceph.quota.max_bytes", fmt.Sprintf("%d", bytesQuota)); err != nil {
+func createVolume(volOptions *volumeOptions, cr *util.Credentials, volID volumeID, bytesQuota int64) error {
+	//TODO: When we support multiple fs, need to hande subvolume group create for all fs's
+	if !cephfsInit {
+		err := execCommandErr(
+			"ceph",
+			"fs",
+			"subvolumegroup",
+			"create",
+			volOptions.FsName,
+			csiSubvolumeGroup,
+			"--mode",
+			"777",
+			"--pool_layout",
+			volOptions.Pool,
+			"-m", volOptions.Monitors,
+			"-c", util.CephConfigPath,
+			"-n", cephEntityClientPrefix+cr.ID,
+			"--key="+cr.Key)
+		if err != nil {
+			klog.Errorf("failed to create subvolume group csi, for the vol %s(%s)", string(volID), err)
 			return err
 		}
+		klog.V(4).Infof("cephfs: created subvolume group csi")
+		cephfsInit = true
 	}
-
-	if err := setVolumeAttribute(volRootCreating, "ceph.dir.layout.pool", volOptions.Pool); err != nil {
-		return fmt.Errorf("%v\ncephfs: Does pool '%s' exist?", err, volOptions.Pool)
-	}
-
-	if err := setVolumeAttribute(volRootCreating, "ceph.dir.layout.pool_namespace", getVolumeNamespace(volID)); err != nil {
+	err := execCommandErr(
+		"ceph",
+		"fs",
+		"subvolume",
+		"create",
+		volOptions.FsName,
+		string(volID),
+		strconv.FormatInt(bytesQuota, 10),
+		"--group_name",
+		csiSubvolumeGroup,
+		"-m", volOptions.Monitors,
+		"-c", util.CephConfigPath,
+		"-n", cephEntityClientPrefix+cr.ID,
+		"--key="+cr.Key)
+	if err != nil {
+		klog.Errorf("failed to create subvolume %s(%s) in fs %s", string(volID), err, volOptions.FsName)
 		return err
-	}
-
-	if err := os.Rename(volRootCreating, volRoot); err != nil {
-		return fmt.Errorf("couldn't mark volume %s as created: %v", volID, err)
 	}
 
 	return nil
 }
 
-func purgeVolume(volID volumeID, adminCr *util.Credentials, volOptions *volumeOptions) error {
+func mountCephRoot(volID volumeID, volOptions *volumeOptions, adminCr *util.Credentials) error {
+	cephRoot := getCephRootPathLocalDeprecated(volID)
+
+	// Root path is not set for dynamically provisioned volumes
+	// Access to cephfs's / is required
+	volOptions.RootPath = "/"
+
+	if err := util.CreateMountPoint(cephRoot); err != nil {
+		return err
+	}
+
+	m, err := newMounter(volOptions)
+	if err != nil {
+		return fmt.Errorf("failed to create mounter: %v", err)
+	}
+
+	if err = m.mount(cephRoot, adminCr, volOptions); err != nil {
+		return fmt.Errorf("error mounting ceph root: %v", err)
+	}
+
+	return nil
+}
+
+func unmountCephRoot(volID volumeID) {
+	cephRoot := getCephRootPathLocalDeprecated(volID)
+
+	if err := unmountVolume(cephRoot); err != nil {
+		klog.Errorf("failed to unmount %s with error %s", cephRoot, err)
+	} else {
+		if err := os.Remove(cephRoot); err != nil {
+			klog.Errorf("failed to remove %s with error %s", cephRoot, err)
+		}
+	}
+}
+
+func purgeVolumeDeprecated(volID volumeID, adminCr *util.Credentials, volOptions *volumeOptions) error {
 	if err := mountCephRoot(volID, volOptions, adminCr); err != nil {
 		return err
 	}
 	defer unmountCephRoot(volID)
 
 	var (
-		volRoot         = getCephRootVolumePathLocal(volID)
+		volRoot         = getCephRootVolumePathLocalDeprecated(volID)
 		volRootDeleting = volRoot + "-deleting"
 	)
 
@@ -122,37 +189,25 @@ func purgeVolume(volID volumeID, adminCr *util.Credentials, volOptions *volumeOp
 	return nil
 }
 
-func mountCephRoot(volID volumeID, volOptions *volumeOptions, adminCr *util.Credentials) error {
-	cephRoot := getCephRootPathLocal(volID)
-
-	// Root path is not set for dynamically provisioned volumes
-	// Access to cephfs's / is required
-	volOptions.RootPath = "/"
-
-	if err := createMountPoint(cephRoot); err != nil {
+func purgeVolume(volID volumeID, cr *util.Credentials, volOptions *volumeOptions) error {
+	err := execCommandErr(
+		"ceph",
+		"fs",
+		"subvolume",
+		"rm",
+		volOptions.FsName,
+		string(volID),
+		"--group_name",
+		csiSubvolumeGroup,
+		"--force",
+		"-m", volOptions.Monitors,
+		"-c", util.CephConfigPath,
+		"-n", cephEntityClientPrefix+cr.ID,
+		"--key="+cr.Key)
+	if err != nil {
+		klog.Errorf("failed to purge subvolume %s(%s) in fs %s", string(volID), err, volOptions.FsName)
 		return err
 	}
 
-	m, err := newMounter(volOptions)
-	if err != nil {
-		return fmt.Errorf("failed to create mounter: %v", err)
-	}
-
-	if err = m.mount(cephRoot, adminCr, volOptions); err != nil {
-		return fmt.Errorf("error mounting ceph root: %v", err)
-	}
-
 	return nil
-}
-
-func unmountCephRoot(volID volumeID) {
-	cephRoot := getCephRootPathLocal(volID)
-
-	if err := unmountVolume(cephRoot); err != nil {
-		klog.Errorf("failed to unmount %s with error %s", cephRoot, err)
-	} else {
-		if err := os.Remove(cephRoot); err != nil {
-			klog.Errorf("failed to remove %s with error %s", cephRoot, err)
-		}
-	}
 }

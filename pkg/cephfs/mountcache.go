@@ -39,11 +39,11 @@ func initVolumeMountCache(driverName, mountCacheDir string) {
 
 	volumeMountCache.nodeCacheStore.BasePath = mountCacheDir
 	volumeMountCache.nodeCacheStore.CacheDir = driverName
-	klog.Infof("mount-cache: name: %s, version: %s, mountCacheDir: %s", driverName, version, mountCacheDir)
+	klog.Infof("mount-cache: name: %s, version: %s, mountCacheDir: %s", driverName, util.DriverVersion, mountCacheDir)
 }
 
 func remountCachedVolumes() error {
-	if err := os.MkdirAll(volumeMountCache.nodeCacheStore.BasePath, 0755); err != nil {
+	if err := util.CreateMountPoint(volumeMountCache.nodeCacheStore.BasePath); err != nil {
 		klog.Errorf("mount-cache: failed to create %s: %v", volumeMountCache.nodeCacheStore.BasePath, err)
 		return err
 	}
@@ -95,11 +95,16 @@ func mountOneCacheEntry(volOptions *volumeOptions, vid *volumeIdentifier, me *vo
 	volID := vid.VolumeID
 
 	if volOptions.ProvisionVolume {
-		volOptions.RootPath = getVolumeRootPathCeph(volumeID(vid.FsSubvolName))
 		cr, err = util.GetAdminCredentials(decodeCredentials(me.Secrets))
 		if err != nil {
 			return err
 		}
+
+		volOptions.RootPath, err = getVolumeRootPathCeph(volOptions, cr, volumeID(vid.FsSubvolName))
+		if err != nil {
+			return err
+		}
+
 		var entity *cephEntity
 		entity, err = getCephUser(volOptions, cr, volumeID(vid.FsSubvolName))
 		if err != nil {
@@ -119,7 +124,7 @@ func mountOneCacheEntry(volOptions *volumeOptions, vid *volumeIdentifier, me *vo
 		return err
 	}
 
-	isMnt, err := isMountPoint(me.StagingPath)
+	isMnt, err := util.IsMountPoint(me.StagingPath)
 	if err != nil {
 		isMnt = false
 		klog.Infof("mount-cache: failed to check volume mounted %s: %s %v", volID, me.StagingPath, err)
@@ -223,7 +228,7 @@ func (mc *volumeMountCacheMap) nodeStageVolume(volID, stagingTargetPath, mounter
 		klog.Warningf("mount-cache: node stage volume ignore last cache entry for volume %s", volID)
 	}
 
-	me = volumeMountCacheEntry{DriverVersion: version}
+	me = volumeMountCacheEntry{DriverVersion: util.DriverVersion}
 
 	me.VolumeID = volID
 	me.Secrets = encodeCredentials(secrets)

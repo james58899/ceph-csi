@@ -31,9 +31,10 @@ import (
 // ExecCommand executes passed in program with args and returns separate stdout and stderr streams
 func ExecCommand(program string, args ...string) (stdout, stderr []byte, err error) {
 	var (
-		cmd       = exec.Command(program, args...) // nolint: gosec
-		stdoutBuf bytes.Buffer
-		stderrBuf bytes.Buffer
+		cmd           = exec.Command(program, args...) // nolint: gosec
+		sanitizedArgs = StripSecretInArgs(args)
+		stdoutBuf     bytes.Buffer
+		stderrBuf     bytes.Buffer
 	)
 
 	cmd.Stdout = &stdoutBuf
@@ -41,7 +42,7 @@ func ExecCommand(program string, args ...string) (stdout, stderr []byte, err err
 
 	if err := cmd.Run(); err != nil {
 		return stdoutBuf.Bytes(), stderrBuf.Bytes(), fmt.Errorf("an error (%v)"+
-			" occurred while running %s", err, program)
+			" occurred while running %s args: %v", err, program, sanitizedArgs)
 	}
 
 	return stdoutBuf.Bytes(), nil, nil
@@ -236,10 +237,10 @@ func CreateObject(monitors string, cr *Credentials, poolName, namespace, objectN
 		args = append(args, "--namespace="+namespace)
 	}
 
-	stdout, _, err := ExecCommand("rados", args[:]...)
+	_, stderr, err := ExecCommand("rados", args[:]...)
 	if err != nil {
 		klog.Errorf("failed creating omap (%s) in pool (%s): (%v)", objectName, poolName, err)
-		if strings.Contains(string(stdout), "error creating "+poolName+"/"+objectName+
+		if strings.Contains(string(stderr), "error creating "+poolName+"/"+objectName+
 			": (17) File exists") {
 			return ErrObjectExists{objectName, err}
 		}
@@ -266,10 +267,10 @@ func RemoveObject(monitors string, cr *Credentials, poolName, namespace, oMapNam
 		args = append(args, "--namespace="+namespace)
 	}
 
-	stdout, _, err := ExecCommand("rados", args[:]...)
+	_, stderr, err := ExecCommand("rados", args[:]...)
 	if err != nil {
 		klog.Errorf("failed removing omap (%s) in pool (%s): (%v)", oMapName, poolName, err)
-		if strings.Contains(string(stdout), "error removing "+poolName+">"+oMapName+
+		if strings.Contains(string(stderr), "error removing "+poolName+">"+oMapName+
 			": (2) No such file or directory") {
 			return ErrObjectNotFound{oMapName, err}
 		}
