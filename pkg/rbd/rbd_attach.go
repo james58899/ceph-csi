@@ -281,8 +281,13 @@ func createPath(volOpt *rbdVolume, cr *util.Credentials) (string, error) {
 		cmdName = rbdTonbd
 	}
 
-	output, err := execCommand(cmdName, []string{
-		"map", imagePath, "--id", cr.ID, "-m", volOpt.Monitors, "--key=" + cr.Key})
+	commandArg := []string{"map", imagePath, "--id", cr.ID, "-m", volOpt.Monitors, "--key=" + cr.Key}
+
+	if useNBD {
+		commandArg = append(commandArg, "--timeout", "2147483647")
+	}
+
+	output, err := execCommand(cmdName, commandArg)
 	if err != nil {
 		klog.Warningf("rbd: map error %v, rbd output: %s", err, string(output))
 		return "", fmt.Errorf("rbd: map failed %v, rbd output: %s", err, string(output))
